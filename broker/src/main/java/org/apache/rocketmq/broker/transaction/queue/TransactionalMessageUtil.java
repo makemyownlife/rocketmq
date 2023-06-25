@@ -16,6 +16,8 @@
  */
 package org.apache.rocketmq.broker.transaction.queue;
 
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.message.MessageAccessor;
@@ -26,12 +28,11 @@ import org.apache.rocketmq.common.message.MessageExtBrokerInner;
 import org.apache.rocketmq.common.sysflag.MessageSysFlag;
 import org.apache.rocketmq.common.topic.TopicValidator;
 
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
-
 public class TransactionalMessageUtil {
-    public static final String REMOVETAG = "d";
+    public static final String REMOVE_TAG = "d";
     public static final Charset CHARSET = StandardCharsets.UTF_8;
+    public static final String OFFSET_SEPARATOR = ",";
+    public static final String TRANSACTION_ID = "__transactionId__";
 
     public static String buildOpTopic() {
         return TopicValidator.RMQ_SYS_TRANS_OP_HALF_TOPIC;
@@ -72,5 +73,21 @@ public class TransactionalMessageUtil {
         msgInner.setSysFlag(sysFlag);
 
         return msgInner;
+    }
+
+    public static long getImmunityTime(String checkImmunityTimeStr, long transactionTimeout) {
+        long checkImmunityTime = 0;
+
+        try {
+            checkImmunityTime = Long.parseLong(checkImmunityTimeStr) * 1000;
+        } catch (Throwable ignored) {
+        }
+
+        //If a custom first check time is set, the minimum check time;
+        //The default check protection period is transactionTimeout
+        if (checkImmunityTime < transactionTimeout) {
+            checkImmunityTime = transactionTimeout;
+        }
+        return checkImmunityTime;
     }
 }

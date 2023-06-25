@@ -17,6 +17,7 @@
 package org.apache.rocketmq.broker.offset;
 
 import com.alibaba.fastjson.annotation.JSONField;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -31,20 +32,21 @@ import org.apache.rocketmq.broker.BrokerPathConfigHelper;
 import org.apache.rocketmq.common.ConfigManager;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.constant.LoggerName;
-import org.apache.rocketmq.common.protocol.header.ExtraInfoUtil;
-import org.apache.rocketmq.logging.InternalLogger;
-import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.logging.org.slf4j.Logger;
+import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.remoting.protocol.RemotingSerializable;
+import org.apache.rocketmq.remoting.protocol.header.ExtraInfoUtil;
 
 public class ConsumerOrderInfoManager extends ConfigManager {
 
-    private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
+    private static final Logger log = LoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
     private static final String TOPIC_GROUP_SEPARATOR = "@";
     private static final long CLEAN_SPAN_FROM_LAST = 24 * 3600 * 1000;
 
     private ConcurrentHashMap<String/* topic@group*/, ConcurrentHashMap<Integer/*queueId*/, OrderInfo>> table =
         new ConcurrentHashMap<>(128);
 
+    private transient ConsumerOrderInfoLockManager consumerOrderInfoLockManager;
     private transient BrokerController brokerController;
 
     public ConsumerOrderInfoManager() {
@@ -52,6 +54,7 @@ public class ConsumerOrderInfoManager extends ConfigManager {
 
     public ConsumerOrderInfoManager(BrokerController brokerController) {
         this.brokerController = brokerController;
+        this.consumerOrderInfoLockManager = new ConsumerOrderInfoLockManager(brokerController);
     }
 
     public ConcurrentHashMap<String, ConcurrentHashMap<Integer, OrderInfo>> getTable() {
@@ -70,6 +73,12 @@ public class ConsumerOrderInfoManager extends ConfigManager {
         return key.split(TOPIC_GROUP_SEPARATOR);
     }
 
+    private void updateLockFreeTimestamp(String topic, String group, int queueId, OrderInfo orderInfo) {
+        if (consumerOrderInfoLockManager != null) {
+            consumerOrderInfoLockManager.updateLockFreeTimestamp(topic, group, queueId, orderInfo);
+        }
+    }
+
     /**
      * update the message list received
      *
@@ -82,7 +91,7 @@ public class ConsumerOrderInfoManager extends ConfigManager {
      * @param msgQueueOffsetList the queue offsets of messages
      * @param orderInfoBuilder will append order info to this builder
      */
-    public void update(boolean isRetry, String topic, String group, int queueId, long popTime, long invisibleTime,
+    public void update(String attemptId, boolean isRetry, String topic, String group, int queueId, long popTime, long invisibleTime,
         List<Long> msgQueueOffsetList, StringBuilder orderInfoBuilder) {
         String key = buildKey(topic, group);
         ConcurrentHashMap<Integer/*queueId*/, OrderInfo> qs = table.get(key);
@@ -97,12 +106,12 @@ public class ConsumerOrderInfoManager extends ConfigManager {
         OrderInfo orderInfo = qs.get(queueId);
 
         if (orderInfo != null) {
-            OrderInfo newOrderInfo = new OrderInfo(popTime, invisibleTime, msgQueueOffsetList, System.currentTimeMillis(), 0);
-            newOrderInfo.mergeOffsetConsumedCount(orderInfo.offsetList, orderInfo.offsetConsumedCount);
+            OrderInfo newOrderInfo = new OrderInfo(attemptId, popTime, invisibleTime, msgQueueOffsetList, System.currentTimeMillis(), 0);
+            newOrderInfo.mergeOffsetConsumedCount(orderInfo.attemptId, orderInfo.offsetList, orderInfo.offsetConsumedCount);
 
             orderInfo = newOrderInfo;
         } else {
-            orderInfo = new OrderInfo(popTime, invisibleTime, msgQueueOffsetList, System.currentTimeMillis(), 0);
+            orderInfo = new OrderInfo(attemptId, popTime, invisibleTime, msgQueueOffsetList, System.currentTimeMillis(), 0);
         }
         qs.put(queueId, orderInfo);
 
@@ -128,9 +137,10 @@ public class ConsumerOrderInfoManager extends ConfigManager {
         // for compatibility
         // the old pop sdk use queueId to get consumedTimes from orderCountInfo
         ExtraInfoUtil.buildQueueIdOrderCountInfo(orderInfoBuilder, isRetry, queueId, minConsumedTimes);
+        updateLockFreeTimestamp(topic, group, queueId, orderInfo);
     }
 
-    public boolean checkBlock(String topic, String group, int queueId, long invisibleTime) {
+    public boolean checkBlock(String attemptId, String topic, String group, int queueId, long invisibleTime) {
         String key = buildKey(topic, group);
         ConcurrentHashMap<Integer/*queueId*/, OrderInfo> qs = table.get(key);
         if (qs == null) {
@@ -146,7 +156,14 @@ public class ConsumerOrderInfoManager extends ConfigManager {
         if (orderInfo == null) {
             return false;
         }
-        return orderInfo.needBlock(invisibleTime);
+        return orderInfo.needBlock(attemptId, invisibleTime);
+    }
+
+    public void clearBlock(String topic, String group, int queueId) {
+        table.computeIfPresent(buildKey(topic, group), (key, val) -> {
+            val.remove(queueId);
+            return val;
+        });
     }
 
     /**
@@ -204,6 +221,7 @@ public class ConsumerOrderInfoManager extends ConfigManager {
         orderInfo.setCommitOffsetBit(orderInfo.commitOffsetBit | (1L << i));
         long nextOffset = orderInfo.getNextOffset();
 
+        updateLockFreeTimestamp(topic, group, queueId, orderInfo);
         return nextOffset;
     }
 
@@ -235,6 +253,7 @@ public class ConsumerOrderInfoManager extends ConfigManager {
         }
 
         orderInfo.updateOffsetNextVisibleTime(queueOffset, nextVisibleTime);
+        updateLockFreeTimestamp(topic, group, queueId, orderInfo);
     }
 
     protected void autoClean() {
@@ -312,6 +331,9 @@ public class ConsumerOrderInfoManager extends ConfigManager {
             ConsumerOrderInfoManager obj = RemotingSerializable.fromJson(jsonString, ConsumerOrderInfoManager.class);
             if (obj != null) {
                 this.table = obj.table;
+                if (this.consumerOrderInfoLockManager != null) {
+                    this.consumerOrderInfoLockManager.recover(this.table);
+                }
             }
         }
     }
@@ -320,6 +342,17 @@ public class ConsumerOrderInfoManager extends ConfigManager {
     public String encode(boolean prettyFormat) {
         this.autoClean();
         return RemotingSerializable.toJson(this, prettyFormat);
+    }
+
+    public void shutdown() {
+        if (this.consumerOrderInfoLockManager != null) {
+            this.consumerOrderInfoLockManager.shutdown();
+        }
+    }
+
+    @VisibleForTesting
+    protected ConsumerOrderInfoLockManager getConsumerOrderInfoLockManager() {
+        return consumerOrderInfoLockManager;
     }
 
     public static class OrderInfo {
@@ -358,17 +391,20 @@ public class ConsumerOrderInfoManager extends ConfigManager {
          */
         @JSONField(name = "cm")
         private long commitOffsetBit;
+        @JSONField(name = "a")
+        private String attemptId;
 
         public OrderInfo() {
         }
 
-        public OrderInfo(long popTime, long invisibleTime, List<Long> queueOffsetList, long lastConsumeTimestamp,
+        public OrderInfo(String attemptId, long popTime, long invisibleTime, List<Long> queueOffsetList, long lastConsumeTimestamp,
             long commitOffsetBit) {
             this.popTime = popTime;
             this.invisibleTime = invisibleTime;
             this.offsetList = buildOffsetList(queueOffsetList);
             this.lastConsumeTimestamp = lastConsumeTimestamp;
             this.commitOffsetBit = commitOffsetBit;
+            this.attemptId = attemptId;
         }
 
         public List<Long> getOffsetList() {
@@ -427,6 +463,14 @@ public class ConsumerOrderInfoManager extends ConfigManager {
             this.offsetConsumedCount = offsetConsumedCount;
         }
 
+        public String getAttemptId() {
+            return attemptId;
+        }
+
+        public void setAttemptId(String attemptId) {
+            this.attemptId = attemptId;
+        }
+
         public static List<Long> buildOffsetList(List<Long> queueOffsetList) {
             List<Long> simple = new ArrayList<>();
             if (queueOffsetList.size() == 1) {
@@ -442,8 +486,11 @@ public class ConsumerOrderInfoManager extends ConfigManager {
         }
 
         @JSONField(serialize = false, deserialize = false)
-        public boolean needBlock(long currentInvisibleTime) {
+        public boolean needBlock(String attemptId, long currentInvisibleTime) {
             if (offsetList == null || offsetList.isEmpty()) {
+                return false;
+            }
+            if (this.attemptId != null && this.attemptId.equals(attemptId)) {
                 return false;
             }
             int num = offsetList.size();
@@ -553,10 +600,14 @@ public class ConsumerOrderInfoManager extends ConfigManager {
          * @param prevOffsetConsumedCount the offset list of message
          */
         @JSONField(serialize = false, deserialize = false)
-        public void mergeOffsetConsumedCount(List<Long> preOffsetList, Map<Long, Integer> prevOffsetConsumedCount) {
+        public void mergeOffsetConsumedCount(String preAttemptId, List<Long> preOffsetList, Map<Long, Integer> prevOffsetConsumedCount) {
             Map<Long, Integer> offsetConsumedCount = new HashMap<>();
             if (prevOffsetConsumedCount == null) {
                 prevOffsetConsumedCount = new HashMap<>();
+            }
+            if (preAttemptId != null && preAttemptId.equals(this.attemptId)) {
+                this.offsetConsumedCount = prevOffsetConsumedCount;
+                return;
             }
             Set<Long> preQueueOffsetSet = new HashSet<>();
             for (int i = 0; i < preOffsetList.size(); i++) {
@@ -586,6 +637,7 @@ public class ConsumerOrderInfoManager extends ConfigManager {
                 .add("offsetConsumedCount", offsetConsumedCount)
                 .add("lastConsumeTimestamp", lastConsumeTimestamp)
                 .add("commitOffsetBit", commitOffsetBit)
+                .add("attemptId", attemptId)
                 .toString();
         }
     }

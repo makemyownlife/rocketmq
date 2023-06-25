@@ -23,11 +23,11 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.common.UtilAll;
 import org.apache.rocketmq.common.message.MessageQueue;
-import org.apache.rocketmq.common.protocol.NamespaceUtil;
 import org.apache.rocketmq.common.utils.NameServerAddressUtils;
-import org.apache.rocketmq.remoting.common.RemotingUtil;
+import org.apache.rocketmq.common.utils.NetworkUtil;
 import org.apache.rocketmq.remoting.netty.TlsSystemConfig;
 import org.apache.rocketmq.remoting.protocol.LanguageCode;
+import org.apache.rocketmq.remoting.protocol.NamespaceUtil;
 import org.apache.rocketmq.remoting.protocol.RequestType;
 
 /**
@@ -38,8 +38,9 @@ public class ClientConfig {
     public static final String SOCKS_PROXY_CONFIG = "com.rocketmq.socks.proxy.config";
     public static final String DECODE_READ_BODY = "com.rocketmq.read.body";
     public static final String DECODE_DECOMPRESS_BODY = "com.rocketmq.decompress.body";
+    public static final String HEART_BEAT_V2 = "com.rocketmq.heartbeat.v2";
     private String namesrvAddr = NameServerAddressUtils.getNameServerAddresses();
-    private String clientIP = RemotingUtil.getLocalAddress();
+    private String clientIP = NetworkUtil.getLocalAddress();
     private String instanceName = System.getProperty("rocketmq.client.name", "DEFAULT");
     private int clientCallbackExecutorThreads = Runtime.getRuntime().availableProcessors();
     protected String namespace;
@@ -64,6 +65,7 @@ public class ClientConfig {
     private boolean decodeReadBody = Boolean.parseBoolean(System.getProperty(DECODE_READ_BODY, "true"));
     private boolean decodeDecompressBody = Boolean.parseBoolean(System.getProperty(DECODE_DECOMPRESS_BODY, "true"));
     private boolean vipChannelEnabled = Boolean.parseBoolean(System.getProperty(SEND_MESSAGE_WITH_VIP_CHANNEL_PROPERTY, "false"));
+    private boolean useHeartbeatV2 = Boolean.parseBoolean(System.getProperty(HEART_BEAT_V2, "false"));
 
     private boolean useTLS = TlsSystemConfig.tlsEnable;
 
@@ -183,6 +185,7 @@ public class ClientConfig {
         this.decodeReadBody = cc.decodeReadBody;
         this.decodeDecompressBody = cc.decodeDecompressBody;
         this.enableStreamRequestType = cc.enableStreamRequestType;
+        this.useHeartbeatV2 = cc.useHeartbeatV2;
     }
 
     public ClientConfig cloneClientConfig() {
@@ -206,6 +209,7 @@ public class ClientConfig {
         cc.decodeReadBody = decodeReadBody;
         cc.decodeDecompressBody = decodeDecompressBody;
         cc.enableStreamRequestType = enableStreamRequestType;
+        cc.useHeartbeatV2 = useHeartbeatV2;
         return cc;
     }
 
@@ -377,6 +381,14 @@ public class ClientConfig {
         this.enableStreamRequestType = enableStreamRequestType;
     }
 
+    public boolean isUseHeartbeatV2() {
+        return useHeartbeatV2;
+    }
+
+    public void setUseHeartbeatV2(boolean useHeartbeatV2) {
+        this.useHeartbeatV2 = useHeartbeatV2;
+    }
+
     @Override
     public String toString() {
         return "ClientConfig [namesrvAddr=" + namesrvAddr
@@ -391,6 +403,6 @@ public class ClientConfig {
             + ", socksProxyConfig=" + socksProxyConfig + ", language=" + language.name()
             + ", namespace=" + namespace + ", mqClientApiTimeout=" + mqClientApiTimeout
             + ", decodeReadBody=" + decodeReadBody + ", decodeDecompressBody=" + decodeDecompressBody
-            + ", enableStreamRequestType=" + enableStreamRequestType + "]";
+            + ", enableStreamRequestType=" + enableStreamRequestType + ", useHeartbeatV2=" + useHeartbeatV2 + "]";
     }
 }
