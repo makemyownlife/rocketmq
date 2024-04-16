@@ -55,11 +55,14 @@ public class DefaultLitePullConsumerUnitTest {
             while (running) {
                 List<MessageExt> messageExts = litePullConsumer.poll();
                 if (CollectionUtils.isNotEmpty(messageExts)) {
+                    System.out.println("消息大小：" + messageExts.size());
                     // 取出第一条消息数据
                     MessageExt first = messageExts.get(0);
-                    // 打印消息内存
-                    System.out.println(new String(first.getBody()));
                     MessageQueue messageQueue = new MessageQueue(first.getTopic(), first.getBrokerName(), first.getQueueId());
+                    for (MessageExt messageExt : messageExts) {
+                        // 打印消息内存
+                        System.out.println(new String(first.getBody()));
+                    }
                     // 回滚到第一条消息的点位
                     litePullConsumer.seek(messageQueue, first.getQueueOffset());
                 }
