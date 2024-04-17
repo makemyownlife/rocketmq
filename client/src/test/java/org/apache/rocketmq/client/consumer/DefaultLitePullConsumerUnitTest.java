@@ -62,9 +62,11 @@ public class DefaultLitePullConsumerUnitTest {
                     for (MessageExt messageExt : messageExts) {
                         // 打印消息内存
                         System.out.println(new String(first.getBody()));
+                        // 业务处理代码
                     }
+                   litePullConsumer.commitSync();
                     // 回滚到第一条消息的点位
-                    litePullConsumer.seek(messageQueue, first.getQueueOffset());
+                 //   litePullConsumer.seek(messageQueue, first.getQueueOffset());
                 }
                 Thread.sleep(5000);
             }
